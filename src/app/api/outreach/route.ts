@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { ICP } from "@/types/icp";
 import { CompanyMatch } from "@/types/company";
 import { Contact, Lead } from "@/types/lead";
+import { saveLeads, graphErrorMessage } from "@/lib/graph";
+import { randomUUID } from "node:crypto";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -44,18 +46,20 @@ const STOPWORDS = new Set(["of", "and", "the", "&", "-", "head"]);
 const words = (s: string) =>
   s.toLowerCase().split(/[^a-z]+/).filter((w) => w && !STOPWORDS.has(w));
 
-/** How well a Hunter contact's job title overlaps the ICP buyer personas (0 = no overlap). */
-function personaMatch(e: HunterEmail, icp: ICP): number {
-  if (!e.position) return 0;
+/** The ICP buyer persona a Hunter contact's job title best overlaps, and how well (0 = no overlap). */
+function bestPersona(e: HunterEmail, icp: ICP): { title: string | null; score: number } {
+  if (!e.position) return { title: null, score: 0 };
   const pos = new Set(words(e.position));
-  let best = 0;
+  let best = { title: null as string | null, score: 0 };
   for (const bt of icp.buyerTitles) {
     const tw = words(bt.title);
-    const overlap = tw.filter((w) => pos.has(w)).length / Math.max(tw.length, 1);
-    best = Math.max(best, overlap * bt.confidence);
+    const score = (tw.filter((w) => pos.has(w)).length / Math.max(tw.length, 1)) * bt.confidence;
+    if (score > best.score) best = { title: bt.title, score };
   }
   return best;
 }
+
+const personaMatch = (e: HunterEmail, icp: ICP) => bestPersona(e, icp).score;
 
 function personaScore(e: HunterEmail, icp: ICP): number {
   const seniorityBonus = e.seniority === "executive" ? 0.15 : e.seniority === "senior" ? 0.1 : 0;
@@ -66,7 +70,7 @@ function personaScore(e: HunterEmail, icp: ICP): number {
 /** A decision-maker either matches a buyer persona by title or is an executive. */
 const isDecisionMaker = (e: HunterEmail, icp: ICP) => personaMatch(e, icp) > 0 || e.seniority === "executive";
 
-function toContact(e: HunterEmail): Contact {
+function toContact(e: HunterEmail, icp: ICP): Contact {
   return {
     name: [e.first_name, e.last_name].filter(Boolean).join(" ") || e.value.split("@")[0],
     title: e.position ?? "Unknown title",
@@ -74,6 +78,7 @@ function toContact(e: HunterEmail): Contact {
     verification: e.verification?.status ?? null,
     confidence: e.confidence,
     source: "hunter",
+    persona: bestPersona(e, icp).title,
   };
 }
 
@@ -89,6 +94,7 @@ function sampleContact(icp: ICP, index: number, reason: string): Contact {
     verification: null,
     confidence: null,
     source: "sample",
+    persona: title,
     sampleReason: reason,
   };
 }
@@ -107,7 +113,7 @@ async function findContact(company: CompanyMatch, icp: ICP, index: number): Prom
       return sampleContact(icp, index, "Hunter found contacts, but none matching the buyer personas");
     }
     const best = candidates.sort((a, b) => personaScore(b, icp) - personaScore(a, icp))[0];
-    return toContact(best);
+    return toContact(best, icp);
   } catch (err) {
     console.error(`Hunter lookup failed for ${company.name}:`, err);
     const reason = err instanceof HunterError ? err.message : "Hunter request failed";
@@ -161,8 +167,9 @@ async function draftEmail(company: CompanyMatch, contact: Contact, product: stri
 
 export async function POST(req: NextRequest) {
   try {
-    const { icp, companies, product } = (await req.json()) as {
+    const { icp, icpId, companies, product } = (await req.json()) as {
       icp?: ICP;
+      icpId?: string;
       companies?: CompanyMatch[];
       product?: string;
     };
@@ -174,7 +181,7 @@ export async function POST(req: NextRequest) {
       companies.map(async (company, i): Promise<Lead> => {
         const contact = await findContact(company, icp, i);
         const draft = await draftEmail(company, contact, product ?? "");
-        return { id: `${i}-${company.name}`, company, contact, draft, status: "pending" };
+        return { id: randomUUID(), company, contact, draft, status: "pending" };
       })
     );
 
@@ -183,7 +190,18 @@ export async function POST(req: NextRequest) {
     if (leads.length === 0) {
       return NextResponse.json({ error: "Failed to draft any emails — check the server log" }, { status: 500 });
     }
-    return NextResponse.json({ leads, failed: companies.length - leads.length });
+    // Save real contacts + leads to the graph (sample contacts are skipped). Never blocks the step.
+    let graph: { saved: boolean; count?: number; error?: string } = { saved: false, error: "No ICP id provided" };
+    if (icpId) {
+      try {
+        graph = { saved: true, count: await saveLeads(icpId, leads) };
+      } catch (err) {
+        console.error("Neo4j save failed:", err);
+        graph = { saved: false, error: graphErrorMessage(err) };
+      }
+    }
+
+    return NextResponse.json({ leads, failed: companies.length - leads.length, graph });
   } catch (err) {
     console.error(err);
     return NextResponse.json({ error: "Failed to build outreach drafts" }, { status: 500 });

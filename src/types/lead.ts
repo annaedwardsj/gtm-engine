@@ -9,6 +9,8 @@ export interface Contact {
   /** Hunter's 0–100 confidence that the email is correct. */
   confidence: number | null;
   source: "hunter" | "sample";
+  /** The ICP buyer persona (exact title) this contact best fits, if any. */
+  persona: string | null;
   /** Why a sample contact was used instead of Hunter (only set when source is "sample"). */
   sampleReason?: string;
 }

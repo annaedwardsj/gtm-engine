@@ -7,6 +7,9 @@ import CompanyCard from "@/components/CompanyCard";
 import { CompanyMatch } from "@/types/company";
 import LeadCard from "@/components/LeadCard";
 import { Lead, LeadStatus } from "@/types/lead";
+import GraphPanel from "@/components/GraphPanel";
+
+type GraphResult = { saved: boolean; error?: string } | undefined;
 
 function Spinner() {
   return (
@@ -33,6 +36,36 @@ export default function Home() {
   const [draftError, setDraftError] = useState<string | null>(null);
   const [busyLead, setBusyLead] = useState<string | null>(null);
 
+  // Graph (Neo4j): one id per generated ICP, a warning if a save failed, and a counter that
+  // tells the Graph panel to reload after each successful write.
+  const [icpId, setIcpId] = useState<string | null>(null);
+  const [graphWarning, setGraphWarning] = useState<string | null>(null);
+  const [graphRefresh, setGraphRefresh] = useState(0);
+
+  function handleGraphResult(graph: GraphResult) {
+    if (!graph) return;
+    if (graph.saved) {
+      setGraphRefresh((n) => n + 1);
+    } else if (graph.error && !graph.error.startsWith("Sample contact")) {
+      setGraphWarning(`Graph not saved: ${graph.error}`);
+    }
+  }
+
+  async function saveDraft(lead: Lead, draft: { subject: string; body: string }) {
+    updateLead(lead.id, { draft });
+    if (lead.contact.source !== "hunter") return; // sample contacts aren't in the graph
+    try {
+      const res = await fetch("/api/leads/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadId: lead.id, ...draft }),
+      });
+      handleGraphResult((await res.json()).graph);
+    } catch {
+      setGraphWarning("Graph not saved: could not reach the server");
+    }
+  }
+
   async function buildOutreach() {
     if (!icp || !companies?.length) return;
     setDrafting(true);
@@ -42,11 +75,12 @@ export default function Home() {
       const res = await fetch("/api/outreach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ icp, companies, product: description }),
+        body: JSON.stringify({ icp, icpId, companies, product: description }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Unknown error");
       setLeads(data.leads);
+      handleGraphResult(data.graph);
       if (data.failed) setDraftError(`${data.failed} draft(s) failed — see the server log.`);
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : "Something went wrong");
@@ -81,6 +115,7 @@ export default function Home() {
         status,
         contactedAt: status === "contacted" ? data.timestamp : undefined,
       });
+      handleGraphResult(data.graph);
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : "Failed to update lead");
     } finally {
@@ -100,11 +135,12 @@ export default function Home() {
       const res = await fetch("/api/companies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ icp }),
+        body: JSON.stringify({ icp, icpId, product: description }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Unknown error");
       setCompanies(data.companies);
+      handleGraphResult(data.graph);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -123,6 +159,8 @@ export default function Home() {
     setSearchError(null);
     setLeads(null);
     setDraftError(null);
+    setGraphWarning(null);
+    setIcpId(crypto.randomUUID());
 
     try {
       const res = await fetch("/api/icp", {
@@ -309,12 +347,23 @@ export default function Home() {
                   onApprove={() => setLeadStatus(lead, "contacted")}
                   onReject={() => setLeadStatus(lead, "rejected")}
                   onRestore={() => setLeadStatus(lead, "pending")}
-                  onSaveDraft={(draft) => updateLead(lead.id, { draft })}
+                  onSaveDraft={(draft) => saveDraft(lead, draft)}
                 />
               ))}
             </div>
           </div>
         )}
+
+        {graphWarning && (
+          <div className="flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <span>{graphWarning}. The app still works; this run just isn&apos;t in Neo4j.</span>
+            <button onClick={() => setGraphWarning(null)} className="text-amber-600 hover:text-amber-800">
+              ✕
+            </button>
+          </div>
+        )}
+
+        <GraphPanel refreshKey={graphRefresh} />
       </div>
     </div>
   );
