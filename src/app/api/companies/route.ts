@@ -52,11 +52,12 @@ const SYSTEM_PROMPT = `You are a B2B prospecting analyst. You are given an Ideal
 Identify 5–8 distinct, real companies that appear in the search results and match the ICP. Return valid JSON only — no markdown, no commentary.
 
 Shape:
-{ "companies": [{ "name": string, "whyMatch": string, "triggerSignal": string | null, "sourceIndex": number }] }
+{ "companies": [{ "name": string, "domain": string | null, "whyMatch": string, "triggerSignal": string | null, "sourceIndex": number }] }
 
 Rules:
 - Only use companies explicitly named in the search results. Never invent companies or facts.
 - Each company must be a specific operating company (not a list article, VC firm, publisher, or research firm).
+- domain: the company's own website domain (e.g. "acme.com", no protocol or path) if it appears in or is unambiguous from the results; null if unsure.
 - whyMatch: 1–2 sentences tying the company to the ICP (industry, size, buyer fit), citing evidence from the result.
 - triggerSignal: a concrete, dated event that happened TO the company itself (funding, hire, launch, expansion, acquisition) that matches or resembles an ICP trigger event, e.g. "Raised $40M Series B in March 2026". A description of what the company sells or does for its clients is NOT a trigger signal. null if none is found — do not guess.
 - sourceIndex: the number of the search result the evidence comes from.
@@ -111,7 +112,13 @@ export async function POST(req: NextRequest) {
     const text = message.content[0].type === "text" ? message.content[0].text : "";
     const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
     const parsed = JSON.parse(json) as {
-      companies: { name: string; whyMatch: string; triggerSignal: string | null; sourceIndex: number }[];
+      companies: {
+        name: string;
+        domain: string | null;
+        whyMatch: string;
+        triggerSignal: string | null;
+        sourceIndex: number;
+      }[];
     };
 
     // Only keep companies whose source actually came back from Tavily.
@@ -120,6 +127,7 @@ export async function POST(req: NextRequest) {
       .slice(0, 8)
       .map((c) => ({
         name: c.name,
+        domain: c.domain?.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] || null,
         whyMatch: c.whyMatch,
         triggerSignal: c.triggerSignal || null,
         sourceUrl: results[c.sourceIndex].url,

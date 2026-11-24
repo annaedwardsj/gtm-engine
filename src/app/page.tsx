@@ -5,6 +5,8 @@ import { ICP } from "@/types/icp";
 import ICPCard from "@/components/ICPCard";
 import CompanyCard from "@/components/CompanyCard";
 import { CompanyMatch } from "@/types/company";
+import LeadCard from "@/components/LeadCard";
+import { Lead, LeadStatus } from "@/types/lead";
 
 function Spinner() {
   return (
@@ -26,12 +28,74 @@ export default function Home() {
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  const [leads, setLeads] = useState<Lead[] | null>(null);
+  const [drafting, setDrafting] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [busyLead, setBusyLead] = useState<string | null>(null);
+
+  async function buildOutreach() {
+    if (!icp || !companies?.length) return;
+    setDrafting(true);
+    setDraftError(null);
+    setLeads(null);
+    try {
+      const res = await fetch("/api/outreach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ icp, companies, product: description }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Unknown error");
+      setLeads(data.leads);
+      if (data.failed) setDraftError(`${data.failed} draft(s) failed — see the server log.`);
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setDrafting(false);
+    }
+  }
+
+  const updateLead = (id: string, patch: Partial<Lead>) =>
+    setLeads((prev) => prev?.map((l) => (l.id === id ? { ...l, ...patch } : l)) ?? null);
+
+  async function setLeadStatus(lead: Lead, status: LeadStatus) {
+    setBusyLead(lead.id);
+    try {
+      // Logs the change server-side. No email is ever sent.
+      const res = await fetch("/api/leads/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: lead.id,
+          company: lead.company.name,
+          contactEmail: lead.contact.email,
+          contactSource: lead.contact.source,
+          status,
+          subject: lead.draft.subject,
+          body: lead.draft.body,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to log status");
+      updateLead(lead.id, {
+        status,
+        contactedAt: status === "contacted" ? data.timestamp : undefined,
+      });
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : "Failed to update lead");
+    } finally {
+      setBusyLead(null);
+    }
+  }
+
   async function findCompanies() {
     if (!icp) return;
     setApproved(true);
     setSearching(true);
     setSearchError(null);
     setCompanies(null);
+    setLeads(null);
+    setDraftError(null);
     try {
       const res = await fetch("/api/companies", {
         method: "POST",
@@ -57,6 +121,8 @@ export default function Home() {
     setApproved(false);
     setCompanies(null);
     setSearchError(null);
+    setLeads(null);
+    setDraftError(null);
 
     try {
       const res = await fetch("/api/icp", {
@@ -187,6 +253,66 @@ export default function Home() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Step 3: Contacts + outreach drafts */}
+        {companies && companies.length > 0 && (
+          <div className="flex items-center justify-between gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/60 px-6 py-4">
+            <div>
+              <p className="text-sm font-semibold text-slate-900">Outreach</p>
+              <p className="text-xs text-slate-500">
+                Finds one decision-maker per company with Hunter (~1 credit each) and drafts an email with Claude.
+              </p>
+            </div>
+            <button
+              onClick={buildOutreach}
+              disabled={drafting}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {drafting ? (
+                <>
+                  <Spinner />
+                  Drafting…
+                </>
+              ) : leads ? (
+                "Redo contacts & drafts"
+              ) : (
+                "Find contacts & draft emails"
+              )}
+            </button>
+          </div>
+        )}
+
+        {draftError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {draftError}
+          </div>
+        )}
+
+        {leads && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="text-lg font-semibold text-slate-900">Review queue</h2>
+              <span className="text-xs text-slate-400">
+                {leads.filter((l) => l.status === "pending").length} to review ·{" "}
+                {leads.filter((l) => l.status === "contacted").length} contacted ·{" "}
+                {leads.filter((l) => l.status === "rejected").length} rejected
+              </span>
+            </div>
+            <div className="space-y-4">
+              {leads.map((lead) => (
+                <LeadCard
+                  key={lead.id}
+                  lead={lead}
+                  busy={busyLead === lead.id}
+                  onApprove={() => setLeadStatus(lead, "contacted")}
+                  onReject={() => setLeadStatus(lead, "rejected")}
+                  onRestore={() => setLeadStatus(lead, "pending")}
+                  onSaveDraft={(draft) => updateLead(lead.id, { draft })}
+                />
+              ))}
+            </div>
           </div>
         )}
       </div>
