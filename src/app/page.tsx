@@ -3,6 +3,17 @@
 import { useState } from "react";
 import { ICP } from "@/types/icp";
 import ICPCard from "@/components/ICPCard";
+import CompanyCard from "@/components/CompanyCard";
+import { CompanyMatch } from "@/types/company";
+
+function Spinner() {
+  return (
+    <svg className="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
 
 export default function Home() {
   const [description, setDescription] = useState("");
@@ -10,12 +21,42 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [approved, setApproved] = useState(false);
+  const [companies, setCompanies] = useState<CompanyMatch[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  async function findCompanies() {
+    if (!icp) return;
+    setApproved(true);
+    setSearching(true);
+    setSearchError(null);
+    setCompanies(null);
+    try {
+      const res = await fetch("/api/companies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ icp }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Unknown error");
+      setCompanies(data.companies);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setSearching(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!description.trim()) return;
     setLoading(true);
     setError(null);
     setIcp(null);
+    setApproved(false);
+    setCompanies(null);
+    setSearchError(null);
 
     try {
       const res = await fetch("/api/icp", {
@@ -75,10 +116,7 @@ export default function Home() {
             >
               {loading ? (
                 <>
-                  <svg className="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
+                  <Spinner />
                   Generating…
                 </>
               ) : (
@@ -97,6 +135,60 @@ export default function Home() {
 
         {/* ICP Result */}
         {icp && <ICPCard icp={icp} />}
+
+        {/* Step 2: Approve ICP → find matching companies */}
+        {icp && (
+          <div className="flex items-center justify-between gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/60 px-6 py-4">
+            <div>
+              <p className="text-sm font-semibold text-slate-900">
+                {approved ? "ICP approved" : "Happy with this ICP?"}
+              </p>
+              <p className="text-xs text-slate-500">
+                Step 2 searches the web with Tavily for 5–8 real companies that match it.
+              </p>
+            </div>
+            <button
+              onClick={findCompanies}
+              disabled={searching}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {searching ? (
+                <>
+                  <Spinner />
+                  Searching…
+                </>
+              ) : approved ? (
+                "Search again"
+              ) : (
+                "Approve ICP & find companies"
+              )}
+            </button>
+          </div>
+        )}
+
+        {searchError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {searchError}
+          </div>
+        )}
+
+        {companies && (
+          <div className="space-y-3">
+            <div className="flex items-baseline justify-between">
+              <h2 className="text-lg font-semibold text-slate-900">Matching companies</h2>
+              <span className="text-xs text-slate-400">{companies.length} found via Tavily</span>
+            </div>
+            {companies.length === 0 ? (
+              <p className="text-sm text-slate-500">No matching companies found in the search results. Try searching again.</p>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {companies.map((c) => (
+                  <CompanyCard key={c.name} company={c} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
